@@ -183,8 +183,13 @@ async function startServer() {
   app.post("/api/remove-bg", uploadMemory.single("image"), async (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-      const apiKey = process.env.REMOVE_BG_API_KEY;
-      if (!apiKey) return res.status(500).json({ error: "REMOVE_BG_API_KEY not configured" });
+      const apiKey = process.env.REMOVE_BG_API_KEY?.trim();
+      
+      if (!apiKey || apiKey === "") {
+        return res.status(500).json({ 
+          error: "Background removal is not configured. Please add REMOVE_BG_API_KEY to your environment variables." 
+        });
+      }
 
       const formData = new FormData();
       formData.append('image_file', new Blob([req.file.buffer]), req.file.originalname);
@@ -198,10 +203,13 @@ async function startServer() {
       res.setHeader('Content-Type', 'image/png');
       res.send(response.data);
     } catch (err: any) {
-      let errorMessage = err.message;
-      if (err.response?.data) {
+      console.error("Remove.bg error:", err.message);
+      let errorMessage = "Failed to remove background.";
+      
+      if (err.response?.status === 403 || err.response?.status === 401) {
+        errorMessage = "Invalid API Key for remove.bg. Please check your configuration.";
+      } else if (err.response?.data) {
         try {
-          // If responseType was arraybuffer, we need to convert it back to string to see the error
           const errorData = Buffer.from(err.response.data).toString();
           const parsedError = JSON.parse(errorData);
           errorMessage = parsedError.errors?.[0]?.title || parsedError.error || errorData;

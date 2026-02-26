@@ -132,8 +132,14 @@ export default function App() {
     qrBg: '#ffffff',
     qrErrorLevel: 'M' as 'L' | 'M' | 'Q' | 'H',
     qrLogoUrl: '',
-    imagePrompt: ''
+    imagePrompt: '',
+    bgEditColor: '#ffffff',
+    bgEditMode: 'transparent' as 'transparent' | 'color' | 'image',
+    bgEditOpacity: 1
   });
+  const [bgEditImage, setBgEditImage] = useState<File | null>(null);
+  const [bgEditImageUrl, setBgEditImageUrl] = useState<string | null>(null);
+  const [isMerging, setIsMerging] = useState(false);
   const [multipleFiles, setMultipleFiles] = useState<File[]>([]);
   const [processedBlob, setProcessedBlob] = useState<Blob | null>(null);
   const [processedUrl, setProcessedUrl] = useState<string | null>(null);
@@ -593,6 +599,68 @@ export default function App() {
     document.body.removeChild(a);
   };
 
+  const applyBackground = async () => {
+    if (!processedUrl || toolSettings.bgEditMode === 'transparent') return;
+    
+    setIsMerging(true);
+    try {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const foreground = new Image();
+      foreground.src = processedUrl;
+      await new Promise((resolve) => (foreground.onload = resolve));
+
+      canvas.width = foreground.width;
+      canvas.height = foreground.height;
+
+      if (toolSettings.bgEditMode === 'color') {
+        ctx.fillStyle = toolSettings.bgEditColor;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      } else if (toolSettings.bgEditMode === 'image' && bgEditImageUrl) {
+        const background = new Image();
+        background.src = bgEditImageUrl;
+        await new Promise((resolve) => (background.onload = resolve));
+        
+        // Draw background (cover fit)
+        const scale = Math.max(canvas.width / background.width, canvas.height / background.height);
+        const x = (canvas.width / 2) - (background.width / 2) * scale;
+        const y = (canvas.height / 2) - (background.height / 2) * scale;
+        ctx.drawImage(background, x, y, background.width * scale, background.height * scale);
+      }
+
+      ctx.globalAlpha = toolSettings.bgEditOpacity;
+      ctx.drawImage(foreground, 0, 0);
+      
+      const mergedUrl = canvas.toDataURL('image/png');
+      const dataURLtoBlob = (dataurl: string) => {
+        const arr = dataurl.split(',');
+        const mime = arr[0].match(/:(.*?);/)?.[1];
+        const bstr = atob(arr[1]);
+        let n = bstr.length;
+        const u8arr = new Uint8Array(n);
+        while (n--) u8arr[n] = bstr.charCodeAt(n);
+        return new Blob([u8arr], { type: mime });
+      };
+      
+      setProcessedUrl(mergedUrl);
+      setProcessedBlob(dataURLtoBlob(mergedUrl));
+    } catch (err) {
+      console.error("Merge failed:", err);
+    } finally {
+      setIsMerging(false);
+    }
+  };
+
+  const handleBgImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setBgEditImage(file);
+      setBgEditImageUrl(URL.createObjectURL(file));
+      setToolSettings({ ...toolSettings, bgEditMode: 'image' });
+    }
+  };
   const reset = () => {
     setFile(null);
     setResult(null);
@@ -602,6 +670,8 @@ export default function App() {
     setProcessedUrl(null);
     setGeneratedPrompt(null);
     setGeneratedImageUrl(null);
+    setBgEditImage(null);
+    setBgEditImageUrl(null);
   };
 
   const selectTool = (id: ToolId) => {
@@ -1017,10 +1087,88 @@ export default function App() {
               )}
 
               {toolId === 'bg-remove' && (
-                <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-                  <p className="text-xs text-blue-600 dark:text-blue-400 leading-relaxed">
-                    This tool uses the remove.bg API to instantly remove backgrounds. Ensure your API key is configured in the environment variables.
-                  </p>
+                <div className="space-y-6">
+                  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                    <p className="text-xs text-blue-600 dark:text-blue-400 leading-relaxed">
+                      This tool uses the remove.bg API to instantly remove backgrounds. Ensure your API key is configured in the environment variables.
+                    </p>
+                  </div>
+
+                  {processedUrl && (
+                    <div className="space-y-4 pt-4 border-t border-slate-200 dark:border-zinc-800">
+                      <h4 className="text-sm font-bold flex items-center gap-2">
+                        <Layers className="w-4 h-4 text-blue-600" />
+                        Edit Background
+                      </h4>
+                      
+                      <div className="grid grid-cols-3 gap-2">
+                        {[
+                          { id: 'transparent', name: 'Transparent', icon: Eraser },
+                          { id: 'color', name: 'Color', icon: Type },
+                          { id: 'image', name: 'Image', icon: ImageIcon }
+                        ].map(mode => (
+                          <button 
+                            key={mode.id}
+                            onClick={() => setToolSettings({...toolSettings, bgEditMode: mode.id as any})}
+                            className={`flex flex-col items-center gap-2 p-3 rounded-lg border transition-all ${toolSettings.bgEditMode === mode.id ? 'border-blue-600 bg-blue-50 text-blue-600 dark:bg-blue-900/20' : 'border-slate-200 dark:border-zinc-800'}`}
+                          >
+                            <mode.icon className="w-4 h-4" />
+                            <span className="text-[10px] font-bold">{mode.name}</span>
+                          </button>
+                        ))}
+                      </div>
+
+                      {toolSettings.bgEditMode === 'color' && (
+                        <div className="space-y-2">
+                          <label className="block text-[10px] font-bold text-slate-400 uppercase">Background Color</label>
+                          <div className="flex gap-2">
+                            <input 
+                              type="color" 
+                              value={toolSettings.bgEditColor} 
+                              onChange={(e) => setToolSettings({...toolSettings, bgEditColor: e.target.value})}
+                              className="w-12 h-10 rounded cursor-pointer bg-transparent"
+                            />
+                            <div className="grid grid-cols-5 gap-1 flex-1">
+                              {['#ffffff', '#000000', '#ff0000', '#00ff00', '#0000ff'].map(c => (
+                                <button 
+                                  key={c}
+                                  onClick={() => setToolSettings({...toolSettings, bgEditColor: c})}
+                                  className="w-full h-10 rounded border border-slate-200 dark:border-zinc-800"
+                                  style={{ backgroundColor: c }}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {toolSettings.bgEditMode === 'image' && (
+                        <div className="space-y-2">
+                          <label className="block text-[10px] font-bold text-slate-400 uppercase">Background Image</label>
+                          <label className="w-full flex items-center justify-center gap-2 p-3 border-2 border-dashed border-slate-200 dark:border-zinc-800 rounded-lg cursor-pointer hover:bg-slate-50 dark:hover:bg-zinc-900 transition-all">
+                            <Upload className="w-4 h-4 text-slate-400" />
+                            <span className="text-xs font-bold text-slate-500">Upload Background</span>
+                            <input type="file" className="hidden" accept="image/*" onChange={handleBgImageChange} />
+                          </label>
+                          {bgEditImageUrl && (
+                            <div className="relative w-full aspect-video rounded-lg overflow-hidden border border-slate-200 dark:border-zinc-800">
+                              <img src={bgEditImageUrl} className="w-full h-full object-cover" />
+                              <button onClick={() => { setBgEditImage(null); setBgEditImageUrl(null); }} className="absolute top-1 right-1 p-1 bg-black/50 text-white rounded-full"><X className="w-3 h-3" /></button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <button 
+                        onClick={applyBackground}
+                        disabled={isMerging || (toolSettings.bgEditMode === 'image' && !bgEditImageUrl)}
+                        className="w-full bg-slate-900 dark:bg-zinc-800 text-white py-3 rounded-lg font-bold hover:opacity-90 transition-all flex items-center justify-center gap-2 text-sm"
+                      >
+                        {isMerging ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                        Apply Background
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
