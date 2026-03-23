@@ -7,8 +7,11 @@ import cors from "cors";
 import sharp from "sharp";
 import { PDFDocument } from "pdf-lib";
 import axios from "axios";
+import cookieParser from "cookie-parser";
 import { v2 as cloudinary } from "cloudinary";
 import streamifier from "streamifier";
+import FormData from "form-data";
+import OpenAI from "openai";
 
 async function startServer() {
   const app = express();
@@ -18,7 +21,21 @@ async function startServer() {
     origin: true,
     credentials: true
   }));
+  app.use(cookieParser());
   app.use(express.json());
+  
+  // Middleware to set a dummy session cookie if not present
+  app.use((req, res, next) => {
+    if (!req.cookies.session_active) {
+      res.cookie('session_active', 'true', { 
+        maxAge: 24 * 60 * 60 * 1000, 
+        httpOnly: true, 
+        secure: true, 
+        sameSite: 'none' 
+      });
+    }
+    next();
+  });
   
   // Health check endpoint
   app.get("/api/health", (req, res) => {
@@ -102,6 +119,33 @@ async function startServer() {
                                   process.env.CLOUDINARY_API_KEY && 
                                   process.env.CLOUDINARY_API_SECRET;
 
+    // Check if ImgBB is configured
+    const isImgBBConfigured = process.env.IMGBB_API_KEY;
+
+    if (isImgBBConfigured) {
+      try {
+        const formData = new FormData();
+        formData.append('image', req.file.buffer.toString('base64'));
+        
+        const response = await axios.post(`https://api.imgbb.com/1/upload?key=${process.env.IMGBB_API_KEY}`, formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data'
+          }
+        });
+
+        return res.json({
+          url: response.data.data.url,
+          filename: response.data.data.id,
+          size: response.data.data.size,
+          mimetype: response.data.data.image.mime,
+          provider: "imgbb"
+        });
+      } catch (err: any) {
+        console.error("ImgBB upload error:", err.response?.data || err.message);
+        // Fallback to other providers if ImgBB fails
+      }
+    }
+
     if (isCloudinaryConfigured) {
       try {
         const uploadStream = cloudinary.uploader.upload_stream(
@@ -183,7 +227,9 @@ async function startServer() {
   app.post("/api/remove-bg", uploadMemory.single("image"), async (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-      const apiKey = process.env.REMOVE_BG_API_KEY?.trim();
+      const apiKey = process.env.REMOVE_BG_API_KEY?.trim()
+        .replace(/^["']|["']$/g, '')
+        .replace(/[^\x20-\x7E]/g, '');
       
       if (!apiKey || apiKey === "") {
         return res.status(500).json({ 
@@ -367,26 +413,6 @@ async function startServer() {
     }
   });
 
-  // 9. Rotate / Flip Tool
-  app.post("/api/rotate", uploadMemory.single("image"), async (req, res) => {
-    try {
-      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-      const angle = parseInt(req.body.angle as string) || 0;
-      const flip = req.body.flip === 'true';
-      const flop = req.body.flop === 'true';
-      
-      let pipeline = sharp(req.file.buffer).rotate(angle);
-      if (flip) pipeline = pipeline.flip();
-      if (flop) pipeline = pipeline.flop();
-
-      const buffer = await pipeline.toBuffer();
-      res.setHeader('Content-Type', req.file.mimetype);
-      res.send(buffer);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // Serve uploaded files
   app.use("/uploads", express.static(uploadsDir));
   app.use("/u", express.static(uploadsDir));
@@ -402,6 +428,82 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+  });
+
+  // 10. AI Image Optimization (ReSmush.it)
+  app.post("/api/optimize-resmush", uploadMemory.single("image"), async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    try {
+      // Step 1: Upload to a public URL (ImgBB or Local fallback)
+      let imageUrl = '';
+      
+      if (process.env.IMGBB_API_KEY) {
+        const form = new FormData();
+        form.append('image', req.file.buffer.toString('base64'));
+        const imgbbRes = await axios.post(`https://api.imgbb.com/1/upload?key=${process.env.IMGBB_API_KEY}`, form, {
+          headers: form.getHeaders()
+        });
+        imageUrl = imgbbRes.data.data.url;
+      } else {
+        // Fallback to local if no ImgBB (requires APP_URL to be public)
+        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+        const filename = uniqueSuffix + path.extname(req.file.originalname);
+        const filePath = path.join(uploadsDir, filename);
+        fs.writeFileSync(filePath, req.file.buffer);
+        const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
+        imageUrl = `${appUrl}/u/${filename}`;
+      }
+
+      // Step 2: Optimize via ReSmush.it
+      const resmushRes = await axios.get(`http://api.resmush.it/ws.php?img=${encodeURIComponent(imageUrl)}`);
+      
+      if (resmushRes.data.error) {
+        throw new Error(resmushRes.data.error_long || "Optimization failed");
+      }
+
+      const optimizedUrl = resmushRes.data.dest;
+      
+      // Step 3: Fetch the optimized image and return it
+      const imageRes = await axios.get(optimizedUrl, { responseType: 'arraybuffer' });
+      res.set('Content-Type', 'image/jpeg');
+      res.send(Buffer.from(imageRes.data));
+    } catch (err: any) {
+      console.error("Optimization error:", err.message);
+      res.status(500).json({ error: "Optimization failed: " + err.message });
+    }
+  });
+
+  // 11. OpenAI Image Generation (DALL-E 3)
+  app.post("/api/openai-image", async (req, res) => {
+    const { prompt } = req.body;
+    if (!prompt) return res.status(400).json({ error: "Prompt is required" });
+
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(400).json({ error: "OpenAI API Key not configured" });
+    }
+
+    try {
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const response = await openai.images.generate({
+        model: "dall-e-3",
+        prompt: prompt,
+        n: 1,
+        size: "1024x1024",
+      });
+
+      const imageUrl = response.data[0].url;
+      if (!imageUrl) throw new Error("No image URL returned");
+
+      const imageRes = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+      res.set('Content-Type', 'image/png');
+      res.send(Buffer.from(imageRes.data));
+    } catch (err: any) {
+      console.error("OpenAI Error:", err.message);
+      res.status(500).json({ error: "OpenAI Generation failed: " + err.message });
+    }
   });
 
   // Vite middleware for development

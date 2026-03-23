@@ -48,6 +48,15 @@ import confetti from 'canvas-confetti';
 import * as QRCode from 'qrcode';
 import { GoogleGenAI } from "@google/genai";
 
+declare global {
+  interface Window {
+    aistudio: {
+      hasSelectedApiKey: () => Promise<boolean>;
+      openSelectKey: () => Promise<void>;
+    };
+  }
+}
+
 interface UploadResponse {
   url: string;
   filename: string;
@@ -55,7 +64,7 @@ interface UploadResponse {
   mimetype: string;
 }
 
-export type ToolId = 'url' | 'pdf' | 'bg-remove' | 'compress' | 'convert' | 'webp' | 'resize' | 'prompt' | 'prompt-to-image' | 'watermark' | 'rotate' | 'qr';
+export type ToolId = 'url' | 'pdf' | 'bg-remove' | 'compress' | 'convert' | 'webp' | 'resize' | 'prompt' | 'prompt-to-image' | 'watermark' | 'qr' | 'optimize-ai' | 'dalle';
 
 interface Tool {
   id: ToolId;
@@ -76,8 +85,9 @@ const TOOLS: Tool[] = [
   { id: 'prompt', name: 'Image to Prompt', description: 'Generate AI prompt from image', icon: Sparkles, color: 'bg-pink-500' },
   { id: 'prompt-to-image', name: 'Prompt to Image', description: 'Generate Image from text prompt', icon: ImageIcon, color: 'bg-violet-500' },
   { id: 'watermark', name: 'Watermark', description: 'Add text watermark to images', icon: Type, color: 'bg-teal-500' },
-  { id: 'rotate', name: 'Rotate & Flip', description: 'Rotate or flip your images', icon: RotateCw, color: 'bg-cyan-500' },
   { id: 'qr', name: 'QR Generator', description: 'Text or Image to QR Code', icon: QrCode, color: 'bg-rose-500' },
+  { id: 'optimize-ai', name: 'AI Optimizer', description: 'Advanced image optimization', icon: Zap, color: 'bg-cyan-500' },
+  { id: 'dalle', name: 'DALL-E 3', description: 'High-quality OpenAI image generation', icon: Wand2, color: 'bg-emerald-500' },
 ];
 
 export default function App() {
@@ -124,9 +134,6 @@ export default function App() {
     cropHeight: 400,
     watermarkText: 'Tooldack',
     watermarkOpacity: 0.5,
-    rotateAngle: 90,
-    flip: false,
-    flop: false,
     qrText: '',
     qrColor: '#000000',
     qrBg: '#ffffff',
@@ -146,7 +153,50 @@ export default function App() {
   const [generatedPrompt, setGeneratedPrompt] = useState<string | null>(null);
   const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
 
+  const [hasApiKey, setHasApiKey] = useState(false);
+
   useEffect(() => {
+    const checkKey = async () => {
+      if (window.aistudio) {
+        try {
+          const selected = await window.aistudio.hasSelectedApiKey();
+          setHasApiKey(selected);
+        } catch (e) {
+          console.error("Error checking API key:", e);
+        }
+      }
+    };
+    checkKey();
+  }, []);
+
+  const handleSelectKey = async () => {
+    if (window.aistudio) {
+      try {
+        await window.aistudio.openSelectKey();
+        setHasApiKey(true);
+      } catch (e) {
+        console.error("Error opening key selector:", e);
+      }
+    }
+  };
+
+  useEffect(() => {
+    const checkConnection = async () => {
+      try {
+        const response = await fetch('/api/health', { credentials: 'include' });
+        const contentType = response.headers.get('content-type');
+        if (!response.ok || !contentType || !contentType.includes('application/json')) {
+          const text = await response.text();
+          if (text.includes('Cookie check') || text.includes('Authenticate in new window') || response.status === 401) {
+            setShowFixConnection(true);
+          }
+        }
+      } catch (err) {
+        console.error('Initial connection check failed:', err);
+      }
+    };
+    checkConnection();
+
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === 'AUTH_SUCCESS') {
         setShowFixConnection(false);
@@ -226,6 +276,12 @@ export default function App() {
   const handleUpload = async () => {
     if (!file) return;
 
+    if (showFixConnection) {
+      handleFixConnection();
+      setError('Opening connection verification window. Please complete the verification in the new window, then try again.');
+      return;
+    }
+
     setUploading(true);
     setError(null);
 
@@ -236,6 +292,7 @@ export default function App() {
       const response = await fetch('/api/upload', {
         method: 'POST',
         body: formData,
+        credentials: 'include',
       });
 
       const contentType = response.headers.get('content-type');
@@ -243,7 +300,7 @@ export default function App() {
         const text = await response.text();
         if (text.includes('Cookie check') || text.includes('Authenticate in new window') || response.status === 401) {
           setShowFixConnection(true);
-          throw new Error('Connection verification required. Please click the "Verify Connection" button below to enable uploads.');
+          throw new Error('Connection verification required. Please click the "Verify Connection" button in the blue bar at the top, then try uploading again.');
         }
         console.error('Non-JSON response:', text);
         throw new Error(`Server returned non-JSON response (${response.status}). Please refresh the page.`);
@@ -282,8 +339,36 @@ export default function App() {
     });
   };
 
+  const checkAiUsageLimit = () => {
+    const today = new Date().toISOString().split('T')[0];
+    const storageKey = `ai_usage_${today}`;
+    const usage = parseInt(localStorage.getItem(storageKey) || '0');
+    
+    if (usage >= 5) {
+      throw new Error('today limit expire please next day try');
+    }
+    
+    localStorage.setItem(storageKey, (usage + 1).toString());
+  };
+
   const handleProcessTool = async () => {
-    if (!file && multipleFiles.length === 0 && selectedTool !== 'qr' && selectedTool !== 'prompt-to-image') return;
+    if (!file && multipleFiles.length === 0 && selectedTool !== 'qr' && selectedTool !== 'prompt-to-image' && selectedTool !== 'dalle') return;
+    
+    if (selectedTool === 'prompt' || selectedTool === 'prompt-to-image' || selectedTool === 'dalle') {
+      try {
+        checkAiUsageLimit();
+      } catch (err: any) {
+        setError(err.message);
+        return;
+      }
+    }
+
+    if (showFixConnection) {
+      handleFixConnection();
+      setError('Opening connection verification window. Please complete the verification in the new window, then try again.');
+      return;
+    }
+
     setUploading(true);
     setError(null);
 
@@ -338,7 +423,7 @@ export default function App() {
       try {
         const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
         const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash-image',
+          model: 'gemini-3.1-flash-image-preview',
           contents: {
             parts: [
               {
@@ -348,26 +433,38 @@ export default function App() {
           },
           config: {
             imageConfig: {
-                  aspectRatio: "1:1",
-              },
+              aspectRatio: "1:1",
+              imageSize: "1K"
+            },
           },
         });
         
         let foundImage = false;
-        if (response.candidates?.[0]?.content?.parts) {
-          for (const part of response.candidates[0].content.parts) {
-            if (part.inlineData) {
-              const base64EncodeString = part.inlineData.data;
-              const imageUrl = `data:image/png;base64,${base64EncodeString}`;
-              setGeneratedImageUrl(imageUrl);
-              foundImage = true;
-              break;
+        let textFeedback = '';
+
+        if (response.candidates && response.candidates.length > 0) {
+          const candidate = response.candidates[0];
+          if (candidate.content && candidate.content.parts) {
+            for (const part of candidate.content.parts) {
+              if (part.inlineData) {
+                const base64EncodeString = part.inlineData.data;
+                const imageUrl = `data:image/png;base64,${base64EncodeString}`;
+                setGeneratedImageUrl(imageUrl);
+                foundImage = true;
+                break;
+              } else if (part.text) {
+                textFeedback += part.text;
+              }
             }
+          }
+
+          if (!foundImage && candidate.finishReason) {
+            textFeedback += ` (Reason: ${candidate.finishReason})`;
           }
         }
         
         if (!foundImage) {
-            throw new Error('No image was generated. Please try a different prompt.');
+          throw new Error(textFeedback || 'The AI model did not generate an image for this prompt. This usually happens if the prompt is blocked by safety filters or if it\'s too vague. Please try a more descriptive or different prompt.');
         }
 
         confetti({
@@ -377,7 +474,12 @@ export default function App() {
         });
       } catch (err: any) {
         console.error("Gemini Error:", err);
-        setError("Failed to generate image: " + err.message);
+        let errorMessage = err.message;
+        if (errorMessage.includes("permission") || errorMessage.includes("403") || errorMessage.includes("not found")) {
+          setHasApiKey(false);
+          errorMessage = "API Permission Denied. This model requires a paid Gemini API key with billing enabled. Please click 'Connect Gemini API' to select a valid key.";
+        }
+        setError("Failed to generate image: " + errorMessage);
       } finally {
         setUploading(false);
       }
@@ -393,7 +495,11 @@ export default function App() {
           const formData = new FormData();
           formData.append('image', file);
           try {
-            const uploadRes = await fetch('/api/upload', { method: 'POST', body: formData });
+            const uploadRes = await fetch('/api/upload', { 
+              method: 'POST', 
+              body: formData,
+              credentials: 'include'
+            });
             if (!uploadRes.ok) {
               const errorData = await uploadRes.json().catch(() => ({}));
               throw new Error(errorData.error || 'Failed to upload image to generate QR link');
@@ -494,6 +600,43 @@ export default function App() {
       return;
     }
 
+    if (selectedTool === 'dalle') {
+      if (!toolSettings.imagePrompt.trim()) {
+        setError('Please enter a prompt first');
+        setUploading(false);
+        return;
+      }
+      try {
+        const response = await fetch('/api/openai-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: toolSettings.imagePrompt }),
+          credentials: 'include'
+        });
+
+        if (!response.ok) {
+          const data = await response.json();
+          throw new Error(data.error || 'DALL-E Generation failed');
+        }
+
+        const blob = await response.blob();
+        setProcessedBlob(blob);
+        const url = URL.createObjectURL(blob);
+        setProcessedUrl(url);
+        
+        confetti({
+          particleCount: 150,
+          spread: 70,
+          origin: { y: 0.6 }
+        });
+      } catch (err: any) {
+        setError(err.message);
+      } finally {
+        setUploading(false);
+      }
+      return;
+    }
+
     const formData = new FormData();
     let endpoint = '';
 
@@ -503,6 +646,10 @@ export default function App() {
     }
 
     switch (selectedTool) {
+      case 'optimize-ai':
+        formData.append('image', file!);
+        endpoint = '/api/optimize-resmush';
+        break;
       case 'pdf':
         multipleFiles.forEach(f => formData.append('images', f));
         endpoint = '/api/image-to-pdf';
@@ -541,19 +688,13 @@ export default function App() {
         formData.append('opacity', toolSettings.watermarkOpacity.toString());
         endpoint = '/api/watermark';
         break;
-      case 'rotate':
-        formData.append('image', file!);
-        formData.append('angle', toolSettings.rotateAngle.toString());
-        formData.append('flip', toolSettings.flip.toString());
-        formData.append('flop', toolSettings.flop.toString());
-        endpoint = '/api/rotate';
-        break;
     }
 
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
         body: formData,
+        credentials: 'include',
       });
 
       if (!response.ok) {
@@ -565,7 +706,7 @@ export default function App() {
           const text = await response.text();
           if (text.includes('Cookie check') || text.includes('Authenticate in new window') || response.status === 401) {
             setShowFixConnection(true);
-            throw new Error('Connection verification required. Please click the "Verify Connection" button below.');
+            throw new Error('Connection verification required. Please click the "Verify Connection" button in the blue bar at the top, then try again.');
           }
           console.error('Non-JSON error response:', text);
           throw new Error(`Server error (${response.status}). Please try again.`);
@@ -593,7 +734,13 @@ export default function App() {
     if (!processedUrl) return;
     const a = document.createElement('a');
     a.href = processedUrl;
-    a.download = selectedTool === 'pdf' ? 'converted.pdf' : selectedTool === 'qr' ? 'qrcode.png' : `processed-${Date.now()}.${toolSettings.format === 'png' ? 'png' : 'jpg'}`;
+    
+    let extension = toolSettings.format === 'png' ? 'png' : 'jpg';
+    if (selectedTool === 'bg-remove' || selectedTool === 'qr') {
+      extension = 'png';
+    }
+    
+    a.download = selectedTool === 'pdf' ? 'converted.pdf' : `processed-${Date.now()}.${extension}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -680,7 +827,7 @@ export default function App() {
     setSelectedTool(id);
   };
 
-  const ToolView = ({ toolId }: { toolId: ToolId }) => {
+  const renderToolView = (toolId: ToolId) => {
     const tool = TOOLS.find(t => t.id === toolId);
     if (!tool) return null;
 
@@ -1011,8 +1158,42 @@ export default function App() {
                 </div>
               )}
 
-              {toolId === 'prompt-to-image' && (
+              {toolId === 'optimize-ai' && (
+                <div className="p-4 bg-cyan-50 dark:bg-cyan-900/20 rounded-lg border border-cyan-200 dark:border-cyan-800">
+                  <p className="text-xs text-cyan-600 dark:text-cyan-400 leading-relaxed font-medium">
+                    This tool uses the ReSmush.it API for advanced image optimization. It reduces file size while maintaining high quality.
+                  </p>
+                </div>
+              )}
+
+              {(toolId === 'prompt-to-image' || toolId === 'dalle') && (
                 <div className="space-y-4">
+                  {toolId === 'prompt-to-image' && !hasApiKey && (
+                    <div className="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-800 mb-4">
+                      <div className="flex items-start gap-3">
+                        <Shield className="w-5 h-5 text-amber-600 mt-0.5" />
+                        <div className="flex-1">
+                          <p className="text-xs font-bold text-amber-800 dark:text-amber-200 mb-2">Gemini API Key Required</p>
+                          <p className="text-[10px] text-amber-700 dark:text-amber-300 mb-3 leading-relaxed">
+                            High-quality image generation requires a paid Gemini API key from a Google Cloud project with billing enabled.
+                          </p>
+                          <button 
+                            onClick={handleSelectKey}
+                            className="bg-amber-600 text-white px-4 py-1.5 rounded text-[10px] font-bold hover:bg-amber-700 transition-all"
+                          >
+                            Connect Gemini API
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {toolId === 'dalle' && (
+                    <div className="p-4 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-200 dark:border-emerald-800 mb-4">
+                      <p className="text-xs text-emerald-600 dark:text-emerald-400 leading-relaxed font-medium">
+                        Generate high-quality images using OpenAI's DALL-E 3 model.
+                      </p>
+                    </div>
+                  )}
                   <div>
                     <label className="block text-xs font-bold text-slate-400 uppercase mb-2">Image Prompt</label>
                     <textarea 
@@ -1053,41 +1234,13 @@ export default function App() {
                 </div>
               )}
 
-              {toolId === 'rotate' && (
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-400 uppercase mb-2">Rotation Angle</label>
-                    <div className="grid grid-cols-4 gap-2">
-                      {[0, 90, 180, 270].map(a => (
-                        <button 
-                          key={a}
-                          onClick={() => setToolSettings({...toolSettings, rotateAngle: a})}
-                          className={`py-2 rounded-lg border font-bold transition-all ${toolSettings.rotateAngle === a ? 'border-blue-600 bg-blue-50 text-blue-600 dark:bg-blue-900/20' : 'border-slate-200 dark:border-zinc-800'}`}
-                        >
-                          {a}°
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button 
-                      onClick={() => setToolSettings({...toolSettings, flip: !toolSettings.flip})}
-                      className={`py-2 rounded-lg border font-bold transition-all ${toolSettings.flip ? 'border-blue-600 bg-blue-50 text-blue-600 dark:bg-blue-900/20' : 'border-slate-200 dark:border-zinc-800'}`}
-                    >
-                      Flip Vertical
-                    </button>
-                    <button 
-                      onClick={() => setToolSettings({...toolSettings, flop: !toolSettings.flop})}
-                      className={`py-2 rounded-lg border font-bold transition-all ${toolSettings.flop ? 'border-blue-600 bg-blue-50 text-blue-600 dark:bg-blue-900/20' : 'border-slate-200 dark:border-zinc-800'}`}
-                    >
-                      Flip Horizontal
-                    </button>
-                  </div>
-                </div>
-              )}
-
               {toolId === 'bg-remove' && (
                 <div className="space-y-6">
+                  <div className="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
+                    <p className="text-xs text-purple-600 dark:text-purple-400 leading-relaxed font-bold">
+                      ✨ Your image will be automatically converted to high-quality PNG with a transparent background.
+                    </p>
+                  </div>
                   <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
                     <p className="text-xs text-blue-600 dark:text-blue-400 leading-relaxed">
                       This tool uses the remove.bg API to instantly remove backgrounds. Ensure your API key is configured in the environment variables.
@@ -1312,13 +1465,13 @@ export default function App() {
       {/* Navbar */}
       <nav className="fixed top-0 left-0 right-0 z-50 bg-white/80 dark:bg-black/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-900">
         {showFixConnection && (
-          <div className="bg-blue-600 text-white py-2 px-6 text-center text-xs font-bold flex items-center justify-center gap-4">
-            <span>Action Required: Please verify your connection to enable all features.</span>
+          <div className="bg-amber-500 text-black py-2.5 px-6 text-center text-xs font-bold flex items-center justify-center gap-4 animate-pulse">
+            <span>⚠️ Connection verification required to upload and process images.</span>
             <button 
               onClick={handleFixConnection}
-              className="bg-white text-blue-600 px-3 py-1 rounded font-black hover:bg-blue-50 transition-colors"
+              className="bg-black text-white px-4 py-1.5 rounded-lg font-black hover:bg-zinc-800 transition-all shadow-lg"
             >
-              Verify Connection
+              Fix Connection Now
             </button>
           </div>
         )}
@@ -1715,7 +1868,7 @@ export default function App() {
               transition={{ duration: 0.3 }}
             >
               {selectedTool ? (
-                <ToolView toolId={selectedTool} />
+                renderToolView(selectedTool)
               ) : (
                 <div className="max-w-7xl mx-auto px-6">
                   <div className="text-center mb-16">
