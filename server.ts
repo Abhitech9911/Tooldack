@@ -129,7 +129,7 @@ async function startServer() {
         
         const response = await axios.post(`https://api.imgbb.com/1/upload?key=${process.env.IMGBB_API_KEY}`, formData, {
           headers: {
-            'Content-Type': 'multipart/form-data'
+            ...formData.getHeaders()
           }
         });
 
@@ -238,11 +238,14 @@ async function startServer() {
       }
 
       const formData = new FormData();
-      formData.append('image_file', new Blob([req.file.buffer]), req.file.originalname);
+      formData.append('image_file', req.file.buffer, { filename: req.file.originalname });
       formData.append('size', 'auto');
 
       const response = await axios.post('https://api.remove.bg/v1.0/removebg', formData, {
-        headers: { 'X-Api-Key': apiKey },
+        headers: { 
+          ...formData.getHeaders(),
+          'X-Api-Key': apiKey 
+        },
         responseType: 'arraybuffer'
       });
 
@@ -458,17 +461,21 @@ async function startServer() {
       }
 
       // Step 2: Optimize via ReSmush.it
+      console.log("Optimizing image:", imageUrl);
       const resmushRes = await axios.get(`http://api.resmush.it/ws.php?img=${encodeURIComponent(imageUrl)}`);
+      console.log("ReSmush response:", resmushRes.data);
       
       if (resmushRes.data.error) {
         throw new Error(resmushRes.data.error_long || "Optimization failed");
       }
 
       const optimizedUrl = resmushRes.data.dest;
+      console.log("Optimized URL:", optimizedUrl);
       
       // Step 3: Fetch the optimized image and return it
       const imageRes = await axios.get(optimizedUrl, { responseType: 'arraybuffer' });
-      res.set('Content-Type', 'image/jpeg');
+      const contentType = imageRes.headers['content-type'] || 'image/jpeg';
+      res.set('Content-Type', contentType);
       res.send(Buffer.from(imageRes.data));
     } catch (err: any) {
       console.error("Optimization error:", err.message);

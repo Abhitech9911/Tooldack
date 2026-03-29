@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useCallback, useEffect } from 'react';
+import axios from 'axios';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Upload, 
@@ -41,12 +42,16 @@ import {
   Bot,
   Wand2,
   Stars,
-  Lightbulb
+  Lightbulb,
+  FileStack,
+  Plus,
+  Eye
 } from 'lucide-react';
 
 import confetti from 'canvas-confetti';
 import * as QRCode from 'qrcode';
 import { GoogleGenAI } from "@google/genai";
+import { PDFDocument } from 'pdf-lib';
 
 declare global {
   interface Window {
@@ -64,7 +69,7 @@ interface UploadResponse {
   mimetype: string;
 }
 
-export type ToolId = 'url' | 'pdf' | 'bg-remove' | 'compress' | 'convert' | 'webp' | 'resize' | 'prompt' | 'prompt-to-image' | 'watermark' | 'qr' | 'optimize-ai' | 'dalle';
+export type ToolId = 'url' | 'pdf' | 'merge-pdf' | 'bg-remove' | 'compress' | 'convert' | 'webp' | 'resize' | 'prompt' | 'watermark' | 'qr' | 'optimize-ai';
 
 interface Tool {
   id: ToolId;
@@ -75,24 +80,50 @@ interface Tool {
 }
 
 const TOOLS: Tool[] = [
-  { id: 'url', name: 'Image to URL', description: 'Get a permanent shareable link', icon: ExternalLink, color: 'bg-blue-500' },
+  { id: 'url', name: 'Image to URL', description: 'Get a permanent shareable link (Paste supported)', icon: ExternalLink, color: 'bg-blue-500' },
   { id: 'pdf', name: 'Image to PDF', description: 'Convert images to a single PDF', icon: FileText, color: 'bg-red-500' },
+  { id: 'merge-pdf', name: 'Merge PDF', description: 'Combine multiple PDF files into one', icon: FileStack, color: 'bg-orange-600' },
   { id: 'bg-remove', name: 'BG Remover', description: 'Remove background instantly', icon: Eraser, color: 'bg-purple-500' },
   { id: 'compress', name: 'Compressor', description: 'Reduce file size while keeping the same format', icon: Minimize2, color: 'bg-green-500' },
   { id: 'convert', name: 'Format Converter', description: 'JPG to PNG and vice versa', icon: RefreshCw, color: 'bg-orange-500' },
   { id: 'webp', name: 'WebP Converter', description: 'Convert to modern WebP format', icon: Zap, color: 'bg-yellow-500' },
   { id: 'resize', name: 'Resize Tool', description: 'Change image dimensions', icon: Maximize2, color: 'bg-indigo-500' },
   { id: 'prompt', name: 'Image to Prompt', description: 'Generate AI prompt from image', icon: Sparkles, color: 'bg-pink-500' },
-  { id: 'prompt-to-image', name: 'Prompt to Image', description: 'Generate Image from text prompt', icon: ImageIcon, color: 'bg-violet-500' },
   { id: 'watermark', name: 'Watermark', description: 'Add text watermark to images', icon: Type, color: 'bg-teal-500' },
   { id: 'qr', name: 'QR Generator', description: 'Text or Image to QR Code', icon: QrCode, color: 'bg-rose-500' },
   { id: 'optimize-ai', name: 'AI Optimizer', description: 'Advanced image optimization', icon: Zap, color: 'bg-cyan-500' },
-  { id: 'dalle', name: 'DALL-E 3', description: 'High-quality OpenAI image generation', icon: Wand2, color: 'bg-emerald-500' },
+];
+
+const PRICING_PLANS = [
+  {
+    name: 'Starter',
+    price: '99',
+    description: 'Perfect for small projects and individuals.',
+    features: ['1,000 uploads/mo', 'Standard support', 'Basic API access', '1GB storage'],
+    color: 'bg-blue-600',
+    popular: false
+  },
+  {
+    name: 'Professional',
+    price: '199',
+    description: 'Ideal for growing teams and businesses.',
+    features: ['10,000 uploads/mo', 'Priority support', 'Full API access', '10GB storage', 'Custom branding'],
+    color: 'bg-indigo-600',
+    popular: true
+  },
+  {
+    name: 'Enterprise',
+    price: '249',
+    description: 'Advanced features for large-scale operations.',
+    features: ['Unlimited uploads', '24/7 dedicated support', 'Advanced security', '100GB storage', 'SLA guarantee'],
+    color: 'bg-purple-600',
+    popular: false
+  }
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'home' | 'features' | 'tools'>('home');
-  const [previousTab, setPreviousTab] = useState<'home' | 'features' | 'tools'>('home');
+  const [activeTab, setActiveTab] = useState<'home' | 'features' | 'tools' | 'pricing'>('home');
+  const [previousTab, setPreviousTab] = useState<'home' | 'features' | 'tools' | 'pricing'>('home');
   const [selectedTool, setSelectedTool] = useState<ToolId | null>(null);
   const [isDarkMode, setIsDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -117,8 +148,12 @@ export default function App() {
   }, [isDarkMode]);
 
   const [isDragging, setIsDragging] = useState(false);
+  const [previewFile, setPreviewFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [result, setResult] = useState<UploadResponse | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -139,6 +174,7 @@ export default function App() {
     qrBg: '#ffffff',
     qrErrorLevel: 'M' as 'L' | 'M' | 'Q' | 'H',
     qrLogoUrl: '',
+    qrMode: 'text' as 'text' | 'image',
     imagePrompt: '',
     bgEditColor: '#ffffff',
     bgEditMode: 'transparent' as 'transparent' | 'color' | 'image',
@@ -146,12 +182,60 @@ export default function App() {
   });
   const [bgEditImage, setBgEditImage] = useState<File | null>(null);
   const [bgEditImageUrl, setBgEditImageUrl] = useState<string | null>(null);
+  const [qrLogoFile, setQrLogoFile] = useState<File | null>(null);
   const [isMerging, setIsMerging] = useState(false);
   const [multipleFiles, setMultipleFiles] = useState<File[]>([]);
+  const [multipleFileUrls, setMultipleFileUrls] = useState<string[]>([]);
   const [processedBlob, setProcessedBlob] = useState<Blob | null>(null);
   const [processedUrl, setProcessedUrl] = useState<string | null>(null);
   const [generatedPrompt, setGeneratedPrompt] = useState<string | null>(null);
   const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setFileUrl(url);
+      return () => URL.revokeObjectURL(url);
+    } else {
+      setFileUrl(null);
+    }
+  }, [file]);
+
+  useEffect(() => {
+    const urls = multipleFiles.map(f => URL.createObjectURL(f));
+    setMultipleFileUrls(urls);
+    return () => urls.forEach(url => URL.revokeObjectURL(url));
+  }, [multipleFiles]);
+
+  useEffect(() => {
+    if (bgEditImage) {
+      const url = URL.createObjectURL(bgEditImage);
+      setBgEditImageUrl(url);
+      return () => URL.revokeObjectURL(url);
+    } else {
+      setBgEditImageUrl(null);
+    }
+  }, [bgEditImage]);
+
+  useEffect(() => {
+    if (qrLogoFile) {
+      const url = URL.createObjectURL(qrLogoFile);
+      setToolSettings(prev => ({ ...prev, qrLogoUrl: url }));
+      return () => URL.revokeObjectURL(url);
+    } else {
+      setToolSettings(prev => ({ ...prev, qrLogoUrl: '' }));
+    }
+  }, [qrLogoFile]);
+
+  useEffect(() => {
+    if (processedBlob) {
+      const url = URL.createObjectURL(processedBlob);
+      setProcessedUrl(url);
+      return () => URL.revokeObjectURL(url);
+    } else {
+      setProcessedUrl(null);
+    }
+  }, [processedBlob]);
 
   const [hasApiKey, setHasApiKey] = useState(false);
 
@@ -207,6 +291,40 @@ export default function App() {
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      if (selectedTool !== 'url') return;
+      
+      const items = event.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          const blob = items[i].getAsFile();
+          if (blob) {
+            const pastedFile = new File([blob], `pasted-image-${Date.now()}.png`, { type: blob.type });
+            setFile(pastedFile);
+            setError(null);
+            setResult(null);
+          }
+        }
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [selectedTool]);
+
+  useEffect(() => {
+    if (previewFile) {
+      const url = URL.createObjectURL(previewFile);
+      setPreviewUrl(url);
+      return () => URL.revokeObjectURL(url);
+    } else {
+      setPreviewUrl(null);
+    }
+  }, [previewFile]);
+
   const copyToClipboard = async () => {
     if (!result) return;
     try {
@@ -236,40 +354,69 @@ export default function App() {
     e.preventDefault();
     setIsDragging(false);
     
-    if (selectedTool === 'pdf') {
-      const droppedFiles = Array.from(e.dataTransfer.files).filter(f => (f as File).type.startsWith('image/'));
+    if (selectedTool === 'pdf' || selectedTool === 'merge-pdf') {
+      const isPdfTool = selectedTool === 'merge-pdf';
+      const droppedFiles = Array.from(e.dataTransfer.files).filter(f => {
+        const file = f as File;
+        return isPdfTool ? file.type === 'application/pdf' : file.type.startsWith('image/');
+      });
       if (droppedFiles.length > 0) {
         setMultipleFiles(prev => [...prev, ...droppedFiles]);
         setError(null);
       } else {
-        setError('Please drop valid image files.');
+        setError(isPdfTool ? 'Please drop valid PDF files.' : 'Please drop valid image files.');
       }
       return;
     }
 
     const droppedFile = e.dataTransfer.files[0];
     if (droppedFile && droppedFile.type.startsWith('image/')) {
-      setFile(droppedFile);
-      setError(null);
+      if (selectedTool === 'qr' && toolSettings.qrMode === 'text') {
+        // In text mode, uploaded image is the logo
+        setQrLogoFile(droppedFile);
+        setError(null);
+      } else {
+        setFile(droppedFile);
+        setError(null);
+        setResult(null);
+        setProcessedBlob(null);
+        setGeneratedPrompt(null);
+        setGeneratedImageUrl(null);
+      }
     } else {
       setError('Please drop a valid image file.');
     }
-  }, [selectedTool]);
+  }, [selectedTool, toolSettings.qrMode]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (selectedTool === 'pdf') {
-      const selectedFiles = Array.from(e.target.files || []).filter(f => (f as File).type.startsWith('image/'));
+    if (selectedTool === 'pdf' || selectedTool === 'merge-pdf') {
+      const isPdfTool = selectedTool === 'merge-pdf';
+      const selectedFiles = Array.from(e.target.files || []).filter(f => {
+        const file = f as File;
+        return isPdfTool ? file.type === 'application/pdf' : file.type.startsWith('image/');
+      });
       if (selectedFiles.length > 0) {
         setMultipleFiles(prev => [...prev, ...selectedFiles]);
         setError(null);
+        setProcessedBlob(null);
       }
       return;
     }
 
     const selectedFile = e.target.files?.[0];
     if (selectedFile) {
-      setFile(selectedFile);
-      setError(null);
+      if (selectedTool === 'qr' && toolSettings.qrMode === 'text') {
+        // In text mode, uploaded image is the logo
+        setQrLogoFile(selectedFile);
+        setError(null);
+      } else {
+        setFile(selectedFile);
+        setError(null);
+        setResult(null);
+        setProcessedBlob(null);
+        setGeneratedPrompt(null);
+        setGeneratedImageUrl(null);
+      }
     }
   };
 
@@ -283,36 +430,22 @@ export default function App() {
     }
 
     setUploading(true);
+    setProgress(0);
     setError(null);
 
     const formData = new FormData();
     formData.append('image', file);
 
     try {
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-        credentials: 'include',
+      const response = await axios.post('/api/upload', formData, {
+        withCredentials: true,
+        onUploadProgress: (progressEvent) => {
+          const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || progressEvent.loaded));
+          setProgress(percentCompleted);
+        }
       });
 
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        const text = await response.text();
-        if (text.includes('Cookie check') || text.includes('Authenticate in new window') || response.status === 401) {
-          setShowFixConnection(true);
-          throw new Error('Connection verification required. Please click the "Verify Connection" button in the blue bar at the top, then try uploading again.');
-        }
-        console.error('Non-JSON response:', text);
-        throw new Error(`Server returned non-JSON response (${response.status}). Please refresh the page.`);
-      }
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Upload failed');
-      }
-
-      setResult(data);
+      setResult(response.data);
       confetti({
         particleCount: 150,
         spread: 70,
@@ -320,10 +453,22 @@ export default function App() {
         colors: ['#2563EB', '#3B82F6', '#60A5FA', '#93C5FD']
       });
     } catch (err: any) {
-      setError(err.message || 'Failed to upload image. Please try again.');
+      if (err.response) {
+        const data = err.response.data;
+        const text = typeof data === 'string' ? data : JSON.stringify(data);
+        if (text.includes('Cookie check') || text.includes('Authenticate in new window') || err.response.status === 401) {
+          setShowFixConnection(true);
+          setError('Connection verification required. Please click the "Verify Connection" button in the blue bar at the top, then try uploading again.');
+        } else {
+          setError(data.error || 'Upload failed');
+        }
+      } else {
+        setError(err.message || 'Failed to upload image. Please try again.');
+      }
       console.error(err);
     } finally {
       setUploading(false);
+      setProgress(0);
     }
   };
 
@@ -352,9 +497,16 @@ export default function App() {
   };
 
   const handleProcessTool = async () => {
-    if (!file && multipleFiles.length === 0 && selectedTool !== 'qr' && selectedTool !== 'prompt-to-image' && selectedTool !== 'dalle') return;
+    if (!file && multipleFiles.length === 0 && selectedTool !== 'qr' && selectedTool !== 'dalle') return;
     
-    if (selectedTool === 'prompt' || selectedTool === 'prompt-to-image' || selectedTool === 'dalle') {
+    setResult(null);
+    setProcessedBlob(null);
+    setGeneratedPrompt(null);
+    setGeneratedImageUrl(null);
+    setError(null);
+    setUploading(true);
+    
+    if (selectedTool === 'prompt' || selectedTool === 'dalle') {
       try {
         checkAiUsageLimit();
       } catch (err: any) {
@@ -366,11 +518,11 @@ export default function App() {
     if (showFixConnection) {
       handleFixConnection();
       setError('Opening connection verification window. Please complete the verification in the new window, then try again.');
+      setUploading(false);
       return;
     }
 
-    setUploading(true);
-    setError(null);
+    setProgress(0);
 
     if (selectedTool === 'prompt') {
       if (!file) {
@@ -414,105 +566,35 @@ export default function App() {
       return;
     }
 
-    if (selectedTool === 'prompt-to-image') {
-      if (!toolSettings.imagePrompt.trim()) {
-        setError('Please enter a prompt first');
-        setUploading(false);
-        return;
-      }
-      try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.1-flash-image-preview',
-          contents: {
-            parts: [
-              {
-                text: toolSettings.imagePrompt,
-              },
-            ],
-          },
-          config: {
-            imageConfig: {
-              aspectRatio: "1:1",
-              imageSize: "1K"
-            },
-          },
-        });
-        
-        let foundImage = false;
-        let textFeedback = '';
-
-        if (response.candidates && response.candidates.length > 0) {
-          const candidate = response.candidates[0];
-          if (candidate.content && candidate.content.parts) {
-            for (const part of candidate.content.parts) {
-              if (part.inlineData) {
-                const base64EncodeString = part.inlineData.data;
-                const imageUrl = `data:image/png;base64,${base64EncodeString}`;
-                setGeneratedImageUrl(imageUrl);
-                foundImage = true;
-                break;
-              } else if (part.text) {
-                textFeedback += part.text;
-              }
-            }
-          }
-
-          if (!foundImage && candidate.finishReason) {
-            textFeedback += ` (Reason: ${candidate.finishReason})`;
-          }
-        }
-        
-        if (!foundImage) {
-          throw new Error(textFeedback || 'The AI model did not generate an image for this prompt. This usually happens if the prompt is blocked by safety filters or if it\'s too vague. Please try a more descriptive or different prompt.');
-        }
-
-        confetti({
-          particleCount: 150,
-          spread: 70,
-          origin: { y: 0.6 }
-        });
-      } catch (err: any) {
-        console.error("Gemini Error:", err);
-        let errorMessage = err.message;
-        if (errorMessage.includes("permission") || errorMessage.includes("403") || errorMessage.includes("not found")) {
-          setHasApiKey(false);
-          errorMessage = "API Permission Denied. This model requires a paid Gemini API key with billing enabled. Please click 'Connect Gemini API' to select a valid key.";
-        }
-        setError("Failed to generate image: " + errorMessage);
-      } finally {
-        setUploading(false);
-      }
-      return;
-    }
-
     if (selectedTool === 'qr') {
       try {
-        let textToEncode = toolSettings.qrText.trim();
+        let textToEncode = '';
         
-        // If an image is provided, upload it first to get a URL
-        if (file) {
+        if (toolSettings.qrMode === 'text') {
+          textToEncode = toolSettings.qrText.trim();
+          if (!textToEncode) {
+            throw new Error('Please enter some text or URL to generate a QR code');
+          }
+        } else {
+          // Image mode
+          if (!file) {
+            throw new Error('Please upload an image to generate a QR code for it');
+          }
+          
           const formData = new FormData();
           formData.append('image', file);
           try {
-            const uploadRes = await fetch('/api/upload', { 
-              method: 'POST', 
-              body: formData,
-              credentials: 'include'
+            const uploadRes = await axios.post('/api/upload', formData, {
+              withCredentials: true,
+              onUploadProgress: (progressEvent) => {
+                const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || progressEvent.loaded));
+                setProgress(percentCompleted);
+              }
             });
-            if (!uploadRes.ok) {
-              const errorData = await uploadRes.json().catch(() => ({}));
-              throw new Error(errorData.error || 'Failed to upload image to generate QR link');
-            }
-            const uploadData = await uploadRes.json();
-            textToEncode = uploadData.url;
+            textToEncode = uploadRes.data.url;
           } catch (uploadErr: any) {
-            throw new Error(`Upload failed: ${uploadErr.message}`);
+            throw new Error(`Upload failed: ${uploadErr.response?.data?.error || uploadErr.message}`);
           }
-        }
-
-        if (!textToEncode) {
-          throw new Error('Please enter some text or upload an image to generate a QR code');
         }
 
         // Use a hidden canvas for drawing
@@ -585,7 +667,6 @@ export default function App() {
 
         const blob = dataURLtoBlob(qrDataUrl);
         setProcessedBlob(blob);
-        setProcessedUrl(qrDataUrl);
         
         confetti({
           particleCount: 100,
@@ -600,37 +681,36 @@ export default function App() {
       return;
     }
 
-    if (selectedTool === 'dalle') {
-      if (!toolSettings.imagePrompt.trim()) {
-        setError('Please enter a prompt first');
+    if (selectedTool === 'merge-pdf') {
+      if (multipleFiles.length < 2) {
+        setError('Please select at least 2 PDF files to merge');
         setUploading(false);
         return;
       }
       try {
-        const response = await fetch('/api/openai-image', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: toolSettings.imagePrompt }),
-          credentials: 'include'
-        });
-
-        if (!response.ok) {
-          const data = await response.json();
-          throw new Error(data.error || 'DALL-E Generation failed');
+        console.log("Starting PDF Merge for", multipleFiles.length, "files");
+        const mergedPdf = await PDFDocument.create();
+        for (let i = 0; i < multipleFiles.length; i++) {
+          const f = multipleFiles[i];
+          console.log(`Loading PDF ${i + 1}:`, f.name);
+          const arrayBuffer = await f.arrayBuffer();
+          const pdf = await PDFDocument.load(arrayBuffer);
+          const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+          copiedPages.forEach((page) => mergedPdf.addPage(page));
         }
-
-        const blob = await response.blob();
+        console.log("Saving merged PDF...");
+        const pdfBytes = await mergedPdf.save();
+        const blob = new Blob([pdfBytes], { type: 'application/pdf' });
         setProcessedBlob(blob);
-        const url = URL.createObjectURL(blob);
-        setProcessedUrl(url);
-        
+        console.log("PDF Merge Complete!");
         confetti({
           particleCount: 150,
           spread: 70,
           origin: { y: 0.6 }
         });
       } catch (err: any) {
-        setError(err.message);
+        console.error("PDF Merge Error Detail:", err);
+        setError("Failed to merge PDFs: " + (err.message || "Unknown error during merge"));
       } finally {
         setUploading(false);
       }
@@ -691,32 +771,17 @@ export default function App() {
     }
 
     try {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        body: formData,
-        credentials: 'include',
+      const response = await axios.post(endpoint, formData, {
+        withCredentials: true,
+        responseType: 'blob',
+        onUploadProgress: (progressEvent) => {
+          const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || progressEvent.loaded));
+          setProgress(percentCompleted);
+        }
       });
 
-      if (!response.ok) {
-        const contentType = response.headers.get('content-type');
-        if (contentType && contentType.includes('application/json')) {
-          const data = await response.json();
-          throw new Error(data.error || 'Processing failed');
-        } else {
-          const text = await response.text();
-          if (text.includes('Cookie check') || text.includes('Authenticate in new window') || response.status === 401) {
-            setShowFixConnection(true);
-            throw new Error('Connection verification required. Please click the "Verify Connection" button in the blue bar at the top, then try again.');
-          }
-          console.error('Non-JSON error response:', text);
-          throw new Error(`Server error (${response.status}). Please try again.`);
-        }
-      }
-
-      const blob = await response.blob();
+      const blob = response.data;
       setProcessedBlob(blob);
-      const url = URL.createObjectURL(blob);
-      setProcessedUrl(url);
       
       confetti({
         particleCount: 100,
@@ -724,23 +789,55 @@ export default function App() {
         origin: { y: 0.6 }
       });
     } catch (err: any) {
-      setError(err.message || 'Failed to process image.');
+      if (err.response) {
+        let data = err.response.data;
+        if (data instanceof Blob) {
+          const text = await data.text();
+          try {
+            data = JSON.parse(text);
+          } catch (e) {
+            data = { error: text };
+          }
+        }
+        const text = typeof data === 'string' ? data : JSON.stringify(data);
+        if (text.includes('Cookie check') || text.includes('Authenticate in new window') || err.response.status === 401) {
+          setShowFixConnection(true);
+          setError('Connection verification required. Please click the "Verify Connection" button in the blue bar at the top, then try again.');
+        } else {
+          setError(data.error || 'Processing failed. Please try again.');
+        }
+      } else {
+        setError(err.message || 'Failed to process image.');
+      }
     } finally {
       setUploading(false);
+      setProgress(0);
     }
   };
 
   const downloadProcessed = () => {
-    if (!processedUrl) return;
+    if (!processedUrl || !processedBlob) return;
     const a = document.createElement('a');
     a.href = processedUrl;
     
-    let extension = toolSettings.format === 'png' ? 'png' : 'jpg';
-    if (selectedTool === 'bg-remove' || selectedTool === 'qr') {
-      extension = 'png';
+    let extension = 'png';
+    if (processedBlob.type === 'image/jpeg') extension = 'jpg';
+    else if (processedBlob.type === 'image/webp') extension = 'webp';
+    else if (processedBlob.type === 'application/pdf') extension = 'pdf';
+    else if (processedBlob.type === 'image/png') extension = 'png';
+    else {
+      // Fallback
+      extension = toolSettings.format === 'png' ? 'png' : 'jpg';
+      if (selectedTool === 'bg-remove' || selectedTool === 'qr') {
+        extension = 'png';
+      } else if (selectedTool === 'optimize-ai') {
+        extension = 'jpg';
+      } else if (selectedTool === 'webp') {
+        extension = 'webp';
+      }
     }
     
-    a.download = selectedTool === 'pdf' ? 'converted.pdf' : `processed-${Date.now()}.${extension}`;
+    a.download = (selectedTool === 'pdf' || selectedTool === 'merge-pdf') ? 'merged.pdf' : `processed-${Date.now()}.${extension}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -804,7 +901,6 @@ export default function App() {
     const file = e.target.files?.[0];
     if (file) {
       setBgEditImage(file);
-      setBgEditImageUrl(URL.createObjectURL(file));
       setToolSettings({ ...toolSettings, bgEditMode: 'image' });
     }
   };
@@ -814,11 +910,12 @@ export default function App() {
     setError(null);
     setMultipleFiles([]);
     setProcessedBlob(null);
-    setProcessedUrl(null);
     setGeneratedPrompt(null);
     setGeneratedImageUrl(null);
     setBgEditImage(null);
-    setBgEditImageUrl(null);
+    setQrLogoFile(null);
+    setUploading(false);
+    setProgress(0);
   };
 
   const selectTool = (id: ToolId) => {
@@ -862,13 +959,13 @@ export default function App() {
               onDrop={handleDrop}
               className={`bg-white dark:bg-zinc-950 rounded-xl border-2 border-dashed transition-all p-8 min-h-[300px] flex flex-col items-center justify-center ${isDragging ? 'border-blue-600 bg-blue-50/50 dark:bg-blue-900/20' : 'border-slate-300 dark:border-zinc-800'}`}
             >
-              {!file && multipleFiles.length === 0 && !processedUrl && !generatedImageUrl && (toolId !== 'url' || !result) && toolId !== 'prompt-to-image' && (
+              {!file && multipleFiles.length === 0 && !processedUrl && !generatedImageUrl && (toolId !== 'url' || !result) && toolId !== 'merge-pdf' && (
                 <div className="flex flex-col items-center">
                   <div className="w-16 h-16 bg-blue-600/10 rounded-full flex items-center justify-center mb-4">
                     {toolId === 'qr' ? <QrCode className="w-8 h-8 text-blue-600" /> : <Upload className="w-8 h-8 text-blue-600" />}
                   </div>
                   <p className="text-sm font-medium mb-4 text-center">
-                    {toolId === 'pdf' ? 'Drag & drop images' : toolId === 'qr' ? 'Upload an image to link or use text' : 'Drag & drop an image'}
+                    {toolId === 'pdf' ? 'Drag & drop images' : toolId === 'url' ? 'Drag & drop or Paste image' : toolId === 'qr' ? (toolSettings.qrMode === 'image' ? 'Upload image to generate QR' : 'Enter text in settings or upload logo') : 'Drag & drop an image'}
                   </p>
                   <label className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold cursor-pointer hover:bg-blue-700 transition-all">
                     Browse
@@ -877,28 +974,129 @@ export default function App() {
                 </div>
               )}
 
-              {toolId === 'prompt-to-image' && !generatedImageUrl && (
-                <div className="flex flex-col items-center">
-                  <div className="w-16 h-16 bg-violet-600/10 rounded-full flex items-center justify-center mb-4">
-                    <ImageIcon className="w-8 h-8 text-violet-600" />
+              {toolId === 'merge-pdf' && !processedUrl && (
+                <div className="w-full space-y-6">
+                  <div className="grid grid-cols-2 gap-4">
+                    {[0, 1].map((index) => (
+                      <div key={index} className={`aspect-[3/4] rounded-2xl border-2 border-dashed transition-all flex flex-col items-center justify-center p-4 ${multipleFiles[index] ? 'border-orange-500 bg-orange-50 dark:bg-orange-900/10' : 'border-slate-200 dark:border-zinc-800 hover:border-orange-400 dark:hover:border-orange-500/50'}`}>
+                        {multipleFiles[index] ? (
+                          <div className="flex flex-col items-center text-center w-full">
+                            <div className="w-12 h-12 bg-orange-100 dark:bg-orange-900/30 rounded-xl flex items-center justify-center mb-3">
+                              <FileText className="w-6 h-6 text-orange-600" />
+                            </div>
+                            <p className="text-[10px] font-bold text-slate-700 dark:text-slate-300 truncate w-full px-2 mb-4">
+                              {multipleFiles[index].name}
+                            </p>
+                            <div className="flex gap-2">
+                              <button 
+                                onClick={() => setPreviewFile(multipleFiles[index])}
+                                className="p-2 bg-white dark:bg-zinc-800 rounded-lg shadow-sm border border-slate-200 dark:border-zinc-700 text-blue-500 hover:bg-blue-50 transition-colors"
+                                title="Preview PDF"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  const newFiles = [...multipleFiles];
+                                  newFiles.splice(index, 1);
+                                  setMultipleFiles(newFiles);
+                                }}
+                                className="p-2 bg-white dark:bg-zinc-800 rounded-lg shadow-sm border border-slate-200 dark:border-zinc-700 text-red-500 hover:bg-red-50 transition-colors"
+                                title="Remove File"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <label className="cursor-pointer flex flex-col items-center w-full h-full justify-center group">
+                            <div className="w-12 h-12 bg-slate-100 dark:bg-zinc-900 rounded-xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                              <Plus className="w-6 h-6 text-slate-400" />
+                            </div>
+                            <span className="text-xs font-bold text-slate-500">Add PDF {index + 1}</span>
+                            <input 
+                              type="file" 
+                              className="hidden" 
+                              accept="application/pdf" 
+                              onChange={(e) => {
+                                if (e.target.files?.[0]) {
+                                  const newFiles = [...multipleFiles];
+                                  newFiles[index] = e.target.files[0];
+                                  setMultipleFiles(newFiles.filter(Boolean));
+                                }
+                              }} 
+                            />
+                          </label>
+                        )}
+                      </div>
+                    ))}
                   </div>
-                  <p className="text-sm font-medium mb-4 text-center">
-                    Your generated image will appear here
-                  </p>
+                  
+                  {multipleFiles.length > 2 && (
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Additional Files</p>
+                      <div className="grid grid-cols-4 gap-2">
+                        {multipleFiles.slice(2).map((f, i) => (
+                          <div key={i+2} className="aspect-square rounded-lg bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 flex flex-col items-center justify-center p-2 relative group">
+                            <FileText className="w-5 h-5 text-red-500 mb-1" />
+                            <span className="text-[8px] font-bold truncate w-full text-center">{f.name}</span>
+                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1">
+                              <button 
+                                onClick={() => setPreviewFile(f)}
+                                className="p-1.5 bg-white rounded-full text-blue-600 shadow-lg hover:scale-110 transition-transform"
+                              >
+                                <Eye className="w-3 h-3" />
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  const newFiles = [...multipleFiles];
+                                  newFiles.splice(i+2, 1);
+                                  setMultipleFiles(newFiles);
+                                }}
+                                className="p-1.5 bg-white rounded-full text-red-600 shadow-lg hover:scale-110 transition-transform"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex justify-center">
+                    <button 
+                      onClick={() => {
+                        const input = document.createElement('input');
+                        input.type = 'file';
+                        input.accept = 'application/pdf';
+                        input.multiple = true;
+                        input.onchange = (e: any) => {
+                          if (e.target.files) {
+                            setMultipleFiles([...multipleFiles, ...Array.from(e.target.files)]);
+                          }
+                        };
+                        input.click();
+                      }}
+                      className="text-xs font-bold text-orange-600 hover:text-orange-700 flex items-center gap-2 bg-orange-50 dark:bg-orange-900/10 px-4 py-2 rounded-full border border-orange-200 dark:border-orange-800/50 transition-all"
+                    >
+                      <Plus className="w-4 h-4" /> Add More PDFs
+                    </button>
+                  </div>
                 </div>
               )}
 
-              {file && !processedUrl && (toolId !== 'url' || !result) && (
+              {file && fileUrl && !processedUrl && (toolId !== 'url' || !result) && (
                 <div className="w-full flex flex-col items-center">
                   <div className="relative w-full aspect-video rounded-lg overflow-hidden border border-slate-200 dark:border-slate-800 mb-4">
-                    <img src={URL.createObjectURL(file)} alt="Preview" className="w-full h-full object-contain" />
+                    <img src={fileUrl} alt="Preview" className="w-full h-full object-contain" />
                     <button onClick={reset} className="absolute top-2 right-2 p-1 bg-black/50 text-white rounded-full"><X className="w-4 h-4" /></button>
                   </div>
                   <p className="text-xs font-bold truncate max-w-full">{file.name}</p>
                 </div>
               )}
 
-              {multipleFiles.length > 0 && !processedUrl && (toolId !== 'url' || !result) && (
+              {multipleFiles.length > 0 && !processedUrl && (toolId !== 'url' || !result) && toolId !== 'merge-pdf' && (
                 <div className="w-full space-y-2">
                   <div className="flex items-center justify-between mb-2">
                     <p className="text-sm font-bold">{multipleFiles.length} files selected</p>
@@ -906,8 +1104,15 @@ export default function App() {
                   </div>
                   <div className="grid grid-cols-4 gap-2">
                     {multipleFiles.map((f, i) => (
-                      <div key={i} className="aspect-square rounded bg-slate-100 dark:bg-zinc-900 overflow-hidden border border-slate-200 dark:border-zinc-800">
-                        <img src={URL.createObjectURL(f)} className="w-full h-full object-cover" />
+                      <div key={i} className="aspect-square rounded bg-slate-100 dark:bg-zinc-900 overflow-hidden border border-slate-200 dark:border-zinc-800 flex flex-col items-center justify-center p-2">
+                        {f.type === 'application/pdf' ? (
+                          <>
+                            <FileText className="w-8 h-8 text-red-500 mb-1" />
+                            <span className="text-[8px] font-bold truncate w-full text-center">{f.name}</span>
+                          </>
+                        ) : (
+                          <img src={multipleFileUrls[i]} className="w-full h-full object-cover" />
+                        )}
                       </div>
                     ))}
                   </div>
@@ -941,30 +1146,6 @@ export default function App() {
                 </div>
               )}
 
-              {generatedImageUrl && (
-                <div className="w-full flex flex-col items-center">
-                  <div className="w-16 h-16 bg-violet-500/10 rounded-full flex items-center justify-center mb-4">
-                    <ImageIcon className="w-8 h-8 text-violet-500" />
-                  </div>
-                  <h3 className="text-lg font-bold mb-6">Image Generated!</h3>
-                  
-                  <div className="w-full aspect-square rounded-lg overflow-hidden border border-slate-200 dark:border-slate-800 mb-6 bg-slate-100 dark:bg-zinc-900">
-                    <img src={generatedImageUrl} alt="Generated" className="w-full h-full object-contain" />
-                  </div>
-
-                  <div className="flex gap-4">
-                    <a 
-                      href={generatedImageUrl} 
-                      download={`generated-${Date.now()}.png`}
-                      className="bg-blue-600 text-white px-8 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-blue-700 transition-all"
-                    >
-                      <Download className="w-4 h-4" /> Download
-                    </a>
-                    <button onClick={reset} className="text-slate-500 font-bold hover:text-slate-700">Reset</button>
-                  </div>
-                </div>
-              )}
-
               {processedUrl && (
                 <div className="w-full flex flex-col items-center">
                   <div className="w-16 h-16 bg-green-500/10 rounded-full flex items-center justify-center mb-4">
@@ -988,12 +1169,27 @@ export default function App() {
                     </div>
                   )}
 
-                  {toolId !== 'pdf' && (
+                  {(toolId !== 'pdf' && toolId !== 'merge-pdf') && (
                     <div className={`w-full aspect-video rounded-lg overflow-hidden border border-slate-200 dark:border-slate-800 mb-6 ${toolId === 'bg-remove' ? 'bg-checkerboard' : ''}`}>
                       <img src={processedUrl} className="w-full h-full object-contain" />
                     </div>
                   )}
-                  <div className="flex gap-4">
+                  {toolId === 'merge-pdf' && (
+                    <div className="w-full aspect-[3/4] rounded-lg overflow-hidden border border-slate-200 dark:border-slate-800 mb-6 bg-slate-100 dark:bg-zinc-900 flex flex-col items-center justify-center p-8">
+                      <FileText className="w-20 h-20 text-orange-600 mb-4" />
+                      <p className="text-sm font-bold text-slate-600 dark:text-slate-400">Merged PDF Ready</p>
+                      <p className="text-xs text-slate-400 mt-2">{((processedBlob?.size || 0) / (1024 * 1024)).toFixed(2)} MB</p>
+                    </div>
+                  )}
+                  <div className="flex gap-4 w-full">
+                    {toolId === 'merge-pdf' && (
+                      <button 
+                        onClick={() => setPreviewFile(new File([processedBlob!], 'merged.pdf', { type: 'application/pdf' }))}
+                        className="bg-slate-100 dark:bg-zinc-800 text-slate-700 dark:text-slate-300 px-6 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-slate-200 dark:hover:bg-zinc-700 border border-slate-200 dark:border-zinc-700"
+                      >
+                        <Eye className="w-4 h-4" /> Preview
+                      </button>
+                    )}
                     <button onClick={downloadProcessed} className="bg-blue-600 text-white px-8 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-blue-700">
                       <Download className="w-4 h-4" /> Download
                     </button>
@@ -1166,51 +1362,6 @@ export default function App() {
                 </div>
               )}
 
-              {(toolId === 'prompt-to-image' || toolId === 'dalle') && (
-                <div className="space-y-4">
-                  {toolId === 'prompt-to-image' && !hasApiKey && (
-                    <div className="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-800 mb-4">
-                      <div className="flex items-start gap-3">
-                        <Shield className="w-5 h-5 text-amber-600 mt-0.5" />
-                        <div className="flex-1">
-                          <p className="text-xs font-bold text-amber-800 dark:text-amber-200 mb-2">Gemini API Key Required</p>
-                          <p className="text-[10px] text-amber-700 dark:text-amber-300 mb-3 leading-relaxed">
-                            High-quality image generation requires a paid Gemini API key from a Google Cloud project with billing enabled.
-                          </p>
-                          <button 
-                            onClick={handleSelectKey}
-                            className="bg-amber-600 text-white px-4 py-1.5 rounded text-[10px] font-bold hover:bg-amber-700 transition-all"
-                          >
-                            Connect Gemini API
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {toolId === 'dalle' && (
-                    <div className="p-4 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-200 dark:border-emerald-800 mb-4">
-                      <p className="text-xs text-emerald-600 dark:text-emerald-400 leading-relaxed font-medium">
-                        Generate high-quality images using OpenAI's DALL-E 3 model.
-                      </p>
-                    </div>
-                  )}
-                  <div>
-                    <label className="block text-xs font-bold text-slate-400 uppercase mb-2">Image Prompt</label>
-                    <textarea 
-                      value={toolSettings.imagePrompt} 
-                      onChange={(e) => setToolSettings({...toolSettings, imagePrompt: e.target.value})}
-                      placeholder="Describe the image you want to generate..."
-                      className="w-full h-32 bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-lg px-4 py-2 resize-none text-sm"
-                    />
-                  </div>
-                  <div className="p-4 bg-violet-50 dark:bg-violet-900/20 rounded-lg border border-violet-200 dark:border-violet-800">
-                    <p className="text-xs text-violet-600 dark:text-violet-400 leading-relaxed font-medium">
-                      Enter a detailed description of the image you want to create. Our AI will generate a high-quality 1024x1024 image based on your prompt.
-                    </p>
-                  </div>
-                </div>
-              )}
-
               {toolId === 'watermark' && (
                 <div className="space-y-4">
                   <div>
@@ -1333,34 +1484,71 @@ export default function App() {
                 </div>
               )}
 
+              {toolId === 'merge-pdf' && (
+                <div className="p-4 bg-orange-50 dark:bg-orange-900/20 rounded-lg border border-orange-200 dark:border-orange-800">
+                  <p className="text-xs text-orange-600 dark:text-orange-400 leading-relaxed font-medium">
+                    Select multiple PDF files to combine them into a single PDF. The pages will be merged in the order the files appear.
+                  </p>
+                </div>
+              )}
+
               {toolId === 'qr' && (
                 <div className="space-y-4">
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="block text-xs font-bold text-slate-400 uppercase">QR Content (Text or URL)</label>
-                      <div className="flex gap-2">
-                        <button 
-                          onClick={() => setToolSettings({...toolSettings, qrText: 'https://google.com'})}
-                          className="text-[10px] text-blue-600 font-bold hover:underline"
-                        >
-                          Sample URL
-                        </button>
-                        <button 
-                          onClick={() => setToolSettings({...toolSettings, qrText: ''})}
-                          className="text-[10px] text-red-500 font-bold hover:underline"
-                        >
-                          Clear
-                        </button>
-                      </div>
-                    </div>
-                    <textarea 
-                      value={toolSettings.qrText} 
-                      onChange={(e) => setToolSettings({...toolSettings, qrText: e.target.value})}
-                      placeholder="Enter text or URL to encode..."
-                      className="w-full bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-lg px-4 py-2 text-sm min-h-[100px]"
-                    />
-                    <p className="text-[10px] text-slate-400 mt-1">Note: If you upload an image, the QR code will link to that image URL instead.</p>
+                  <div className="flex p-1 bg-slate-100 dark:bg-zinc-900 rounded-xl border border-slate-200 dark:border-zinc-800">
+                    <button 
+                      onClick={() => setToolSettings({...toolSettings, qrMode: 'text'})}
+                      className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${toolSettings.qrMode === 'text' ? 'bg-white dark:bg-zinc-800 text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                      Link / Text
+                    </button>
+                    <button 
+                      onClick={() => setToolSettings({...toolSettings, qrMode: 'image'})}
+                      className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${toolSettings.qrMode === 'image' ? 'bg-white dark:bg-zinc-800 text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                      Image to QR
+                    </button>
                   </div>
+
+                  {toolSettings.qrMode === 'text' ? (
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="block text-xs font-bold text-slate-400 uppercase">QR Content (Text or URL)</label>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => setToolSettings({...toolSettings, qrText: 'https://google.com'})}
+                            className="text-[10px] text-blue-600 font-bold hover:underline"
+                          >
+                            Sample URL
+                          </button>
+                          <button 
+                            onClick={() => setToolSettings({...toolSettings, qrText: ''})}
+                            className="text-[10px] text-red-500 font-bold hover:underline"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </div>
+                      <textarea 
+                        value={toolSettings.qrText} 
+                        onChange={(e) => setToolSettings({...toolSettings, qrText: e.target.value})}
+                        placeholder="Enter text or URL to encode..."
+                        className="w-full bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-lg px-4 py-2 text-sm min-h-[100px]"
+                      />
+                    </div>
+                  ) : (
+                    <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-800">
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-8 h-8 bg-blue-600/10 rounded-lg flex items-center justify-center">
+                          <ImageIcon className="w-4 h-4 text-blue-600" />
+                        </div>
+                        <p className="text-xs font-bold text-blue-700 dark:text-blue-400">Image to QR Mode</p>
+                      </div>
+                      <p className="text-[10px] text-blue-600/70 dark:text-blue-400/70 leading-relaxed">
+                        Upload an image in the left panel. We will host it permanently and generate a QR code that links directly to it.
+                      </p>
+                    </div>
+                  )}
+                  
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs font-bold text-slate-400 uppercase mb-2">QR Color</label>
@@ -1400,7 +1588,7 @@ export default function App() {
 
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <label className="block text-xs font-bold text-slate-400 uppercase">Center Logo (Optional URL)</label>
+                      <label className="block text-xs font-bold text-slate-400 uppercase">Center Logo (Optional)</label>
                       <button 
                         onClick={() => setToolSettings({...toolSettings, qrLogoUrl: 'https://cdn-icons-png.flaticon.com/512/25/25231.png', qrErrorLevel: 'H'})}
                         className="text-[10px] text-blue-600 font-bold hover:underline"
@@ -1408,35 +1596,62 @@ export default function App() {
                         Use Sample Logo
                       </button>
                     </div>
-                    <div className="flex gap-2">
-                      <input 
-                        type="text" 
-                        value={toolSettings.qrLogoUrl} 
-                        onChange={(e) => setToolSettings({...toolSettings, qrLogoUrl: e.target.value})}
-                        placeholder="https://example.com/logo.png"
-                        className="flex-1 bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-lg px-4 py-2 text-sm"
-                      />
-                      {toolSettings.qrLogoUrl && (
-                        <div className="flex items-center gap-2">
-                          <div className="w-10 h-10 rounded border border-slate-200 dark:border-zinc-800 overflow-hidden bg-white">
-                            <img src={toolSettings.qrLogoUrl} alt="Logo Preview" className="w-full h-full object-contain" onError={(e) => (e.currentTarget.src = 'https://placehold.co/40x40?text=!')} />
+                    <div className="space-y-2">
+                      <div className="flex gap-2">
+                        <input 
+                          type="text" 
+                          value={toolSettings.qrLogoUrl} 
+                          onChange={(e) => setToolSettings({...toolSettings, qrLogoUrl: e.target.value})}
+                          placeholder="Logo URL or upload image on left..."
+                          className="flex-1 bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-lg px-4 py-2 text-sm"
+                        />
+                        {toolSettings.qrLogoUrl && (
+                          <div className="flex items-center gap-2">
+                            <div className="w-10 h-10 rounded border border-slate-200 dark:border-zinc-800 overflow-hidden bg-white">
+                              <img src={toolSettings.qrLogoUrl} alt="Logo Preview" className="w-full h-full object-contain" onError={(e) => (e.currentTarget.src = 'https://placehold.co/40x40?text=!')} />
+                            </div>
+                            <button 
+                              onClick={() => setToolSettings({...toolSettings, qrLogoUrl: ''})}
+                              className="p-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg"
+                            >
+                              <X className="w-5 h-5" />
+                            </button>
                           </div>
-                          <button 
-                            onClick={() => setToolSettings({...toolSettings, qrLogoUrl: ''})}
-                            className="p-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg"
-                          >
-                            <X className="w-5 h-5" />
-                          </button>
-                        </div>
+                        )}
+                      </div>
+                      {toolSettings.qrMode === 'text' && !toolSettings.qrLogoUrl && (
+                        <p className="text-[10px] text-slate-400 italic">Tip: Drag & drop an image on the left to use it as a logo.</p>
                       )}
                     </div>
                   </div>
                 </div>
               )}
 
+              {uploading && (
+                <div className="w-full mt-8">
+                  <div className="flex justify-between mb-1">
+                    <span className="text-[10px] font-bold text-blue-600 uppercase">Processing</span>
+                    <span className="text-[10px] font-bold text-blue-600">{progress}%</span>
+                  </div>
+                  <div className="w-full bg-slate-100 dark:bg-zinc-800 rounded-full h-1.5 overflow-hidden">
+                    <motion.div 
+                      initial={{ width: 0 }}
+                      animate={{ width: `${progress}%` }}
+                      className="bg-blue-600 h-full rounded-full"
+                    />
+                  </div>
+                </div>
+              )}
+
               <button 
                 onClick={handleProcessTool}
-                disabled={uploading || (!file && multipleFiles.length === 0 && (toolId !== 'qr' || !toolSettings.qrText) && (toolId !== 'prompt-to-image' || !toolSettings.imagePrompt))}
+                disabled={uploading || 
+                  (toolId === 'merge-pdf' ? multipleFiles.length < 2 : (!file && multipleFiles.length === 0 && !['qr'].includes(toolId))) ||
+                  (toolId === 'qr' && (
+                    (toolSettings.qrMode === 'text' && !toolSettings.qrText) ||
+                    (toolSettings.qrMode === 'image' && !file)
+                  ))
+                }
                 className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2 mt-8 shadow-lg shadow-blue-600/20"
               >
                 {uploading ? (
@@ -1515,7 +1730,12 @@ export default function App() {
             >
               Tools
             </button>
-            <a href="#pricing" className="text-sm font-medium text-slate-600 dark:text-white hover:text-blue-600 transition-colors">Pricing</a>
+            <button 
+              onClick={() => setActiveTab('pricing')}
+              className={`text-sm font-medium transition-colors ${activeTab === 'pricing' ? 'text-blue-600' : 'text-slate-600 dark:text-white hover:text-blue-600'}`}
+            >
+              Pricing
+            </button>
           </div>
 
           <div className="flex items-center gap-4">
@@ -1600,7 +1820,7 @@ export default function App() {
                         </div>
                         <h2 className="text-3xl md:text-4xl font-bold mb-4">Unleash the Power of AI</h2>
                         <p className="text-slate-600 dark:text-slate-300 mb-6">
-                          Experience our new AI-powered tools. Generate detailed prompts from images or create stunning visuals from simple text descriptions.
+                          Experience our new AI-powered tools. Generate detailed prompts from images or optimize your visuals with advanced AI algorithms.
                         </p>
                         <div className="flex flex-wrap gap-4">
                           <button 
@@ -1610,10 +1830,10 @@ export default function App() {
                             Image to Prompt
                           </button>
                           <button 
-                            onClick={() => { setActiveTab('tools'); selectTool('prompt-to-image'); }}
-                            className="bg-violet-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-violet-700 transition-all flex items-center gap-2"
+                            onClick={() => { setActiveTab('tools'); selectTool('optimize-ai'); }}
+                            className="bg-cyan-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-cyan-700 transition-all flex items-center gap-2"
                           >
-                            Prompt to Image
+                            AI Optimizer
                           </button>
                         </div>
                       </div>
@@ -1688,7 +1908,7 @@ export default function App() {
                           >
                             <div className="relative w-full max-w-xs aspect-square rounded-lg overflow-hidden border border-slate-200 dark:border-slate-800 mb-6">
                               <img 
-                                src={URL.createObjectURL(file)} 
+                                src={fileUrl || ''} 
                                 alt="Preview" 
                                 className="w-full h-full object-cover"
                               />
@@ -1703,6 +1923,23 @@ export default function App() {
                               <p className="font-bold truncate max-w-[200px]">{file.name}</p>
                               <p className="text-xs text-slate-500">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
                             </div>
+
+                            {uploading && (
+                              <div className="w-full max-w-xs mb-6">
+                                <div className="flex justify-between mb-1">
+                                  <span className="text-[10px] font-bold text-blue-600 uppercase">Uploading</span>
+                                  <span className="text-[10px] font-bold text-blue-600">{progress}%</span>
+                                </div>
+                                <div className="w-full bg-slate-100 dark:bg-zinc-800 rounded-full h-1.5 overflow-hidden">
+                                  <motion.div 
+                                    initial={{ width: 0 }}
+                                    animate={{ width: `${progress}%` }}
+                                    className="bg-blue-600 h-full rounded-full"
+                                  />
+                                </div>
+                              </div>
+                            )}
+
                             <button 
                               onClick={handleUpload}
                               disabled={uploading}
@@ -1894,6 +2131,67 @@ export default function App() {
                 </div>
               )}
             </motion.div>
+          ) : activeTab === 'pricing' ? (
+            <motion.div
+              key="pricing"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              transition={{ duration: 0.3 }}
+              className="max-w-7xl mx-auto px-6 py-12"
+            >
+              <div className="text-center mb-16">
+                <h2 className="text-4xl font-black mb-4">Simple, Transparent <span className="text-blue-600">Pricing</span></h2>
+                <p className="text-slate-600 dark:text-slate-300 max-w-2xl mx-auto">Choose the plan that's right for you. All plans include our core features and global CDN delivery.</p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                {PRICING_PLANS.map((plan, i) => (
+                  <motion.div
+                    key={plan.name}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: i * 0.1 }}
+                    className={`relative bg-white dark:bg-zinc-950 rounded-3xl p-8 border-2 transition-all hover:shadow-2xl ${plan.popular ? 'border-blue-600 scale-105 z-10' : 'border-slate-200 dark:border-zinc-800'}`}
+                  >
+                    {plan.popular && (
+                      <div className="absolute -top-4 left-1/2 -translate-x-1/2 bg-blue-600 text-white px-4 py-1 rounded-full text-xs font-bold uppercase tracking-wider">
+                        Most Popular
+                      </div>
+                    )}
+                    <div className="mb-8">
+                      <h3 className="text-xl font-bold mb-2">{plan.name}</h3>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">{plan.description}</p>
+                    </div>
+                    <div className="mb-8">
+                      <div className="flex items-baseline gap-1">
+                        <span className="text-4xl font-black">₹{plan.price}</span>
+                        <span className="text-slate-500 font-medium">/month</span>
+                      </div>
+                    </div>
+                    <ul className="space-y-4 mb-8">
+                      {plan.features.map(feature => (
+                        <li key={feature} className="flex items-center gap-3 text-sm">
+                          <Check className="w-5 h-5 text-green-500 flex-shrink-0" />
+                          <span>{feature}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <button className={`w-full py-4 rounded-xl font-bold transition-all ${plan.popular ? 'bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-600/20' : 'bg-slate-100 dark:bg-zinc-900 text-slate-900 dark:text-white hover:bg-slate-200 dark:hover:bg-zinc-800'}`}>
+                      Get Started
+                    </button>
+                  </motion.div>
+                ))}
+              </div>
+
+              <div className="mt-20 p-12 bg-slate-50 dark:bg-zinc-900 rounded-3xl border border-slate-200 dark:border-zinc-800 text-center">
+                <h3 className="text-2xl font-bold mb-4">Need a custom solution?</h3>
+                <p className="text-slate-600 dark:text-slate-300 mb-8 max-w-2xl mx-auto">We offer custom plans for high-volume users and specialized requirements. Contact our sales team for a tailored quote.</p>
+                <button className="bg-white dark:bg-zinc-950 border border-slate-200 dark:border-zinc-800 px-8 py-3 rounded-xl font-bold hover:bg-slate-50 dark:hover:bg-zinc-900 transition-all">
+                  Contact Sales
+                </button>
+              </div>
+            </motion.div>
           ) : (
             <motion.div
               key="features"
@@ -1963,9 +2261,9 @@ export default function App() {
           <div>
             <h4 className="font-bold mb-4">Product</h4>
             <ul className="space-y-2 text-sm text-slate-500">
-              <li><a href="#" className="hover:text-blue-600">Features</a></li>
+              <li><button onClick={() => setActiveTab('features')} className="hover:text-blue-600">Features</button></li>
               <li><a href="#" className="hover:text-blue-600">API</a></li>
-              <li><a href="#" className="hover:text-blue-600">Pricing</a></li>
+              <li><button onClick={() => setActiveTab('pricing')} className="hover:text-blue-600">Pricing</button></li>
               <li><a href="#" className="hover:text-blue-600">Roadmap</a></li>
             </ul>
           </div>
@@ -2007,6 +2305,58 @@ export default function App() {
           </div>
         </div>
       </footer>
+      <AnimatePresence>
+        {previewFile && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-8 bg-black/80 backdrop-blur-sm"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white dark:bg-zinc-950 w-full max-w-5xl h-full max-h-[90vh] rounded-2xl overflow-hidden flex flex-col shadow-2xl"
+            >
+              <div className="p-4 border-b border-slate-200 dark:border-zinc-800 flex items-center justify-between bg-slate-50 dark:bg-zinc-900">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-orange-100 dark:bg-orange-900/30 rounded-lg flex items-center justify-center">
+                    <FileText className="w-5 h-5 text-orange-600" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm truncate max-w-[200px] md:max-w-md">{previewFile.name}</h3>
+                    <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">PDF Preview</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setPreviewFile(null)}
+                  className="p-2 hover:bg-slate-200 dark:hover:bg-zinc-800 rounded-full transition-colors"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+              <div className="flex-1 bg-slate-100 dark:bg-zinc-900 p-4 overflow-hidden">
+                {previewUrl && (
+                  <embed 
+                    src={previewUrl} 
+                    type="application/pdf"
+                    className="w-full h-full rounded-lg border-none bg-white"
+                  />
+                )}
+              </div>
+              <div className="p-4 border-t border-slate-200 dark:border-zinc-800 flex justify-end bg-slate-50 dark:bg-zinc-900">
+                <button 
+                  onClick={() => setPreviewFile(null)}
+                  className="bg-slate-900 dark:bg-white text-white dark:text-slate-900 px-6 py-2 rounded-lg font-bold hover:opacity-90 transition-opacity"
+                >
+                  Close Preview
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
